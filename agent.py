@@ -1,58 +1,59 @@
 import os
-import google.generativeai as genai
+import json
+import sys
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+from typing import List
 
-# Load key-value pairs from the local .env file
+# 1. Load your .env file
 load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY")
 
-if not api_key:
-    raise ValueError("System Error: GEMINI_API_KEY is missing from the local environment (.env) file.")
+# 2. Force resolve the Google GenAI SDK
+try:
+    import google.genai
+    from google.genai import types
+except ImportError:
+    sys.path.append('/home/user/.local/lib/python3.10/site-packages')
+    import google.genai
+    from google.genai import types
 
-# Bind API token to the Google GenAI SDK wrapper
-genai.configure(api_key=api_key)
+# 3. Define Data Structures
+class TaskAllocation(BaseModel):
+    owner: str = Field(description="Name or role of the person responsible for the task.")
+    task: str = Field(description="Detailed description of the actionable task.")
+    deadline: str = Field(description="Extracted deadline, milestone, or timeframe.")
 
-def process_transcript(transcript_text: str) -> dict:
-    """
-    Ingests raw transcript strings, passes them to gemini-1.5-flash with rigorous 
-    structural framing, and splits the response into programmatic data segments.
-    """
-    model = genai.GenerativeModel('gemini-1.5-flash')
+class MeetingAssetsSchema(BaseModel):
+    summary: str = Field(description="Concise, high-impact executive summary.")
+    tasks: List[TaskAllocation] = Field(description="List of action items.")
+    email: str = Field(description="Professional broadcast-ready email draft.")
+
+# 4. Core Backend Engine
+def process_transcript(raw_transcript: str) -> dict:
+    # Initialize client; ensures GOOGLE_API_KEY is read from .env
+    client = google.genai.Client()
     
-    # Rigorous formatting instructions to ensure the model output is parseable by code
-    prompt = f"""
-    You are an autonomous administrative AI agent. Your task is to process raw conversation logs.
-    
-    Raw Log:
-    \"\"\"{transcript_text}\"\"\"
-    
-    Execute compliance checks and map outputs into exactly three sections. 
-    Separate each section using the literal delimiter sequence: ---SPLIT---
-    Do not add text, intros, or markdown headers like '# Section 1' outside the split tags.
-
-    [SECTION 1]: Structured bulleted points containing executive meeting minutes, key technical alignments, and strategic decisions.
-    ---SPLIT---
-    [SECTION 2]: A clear Markdown data table representing action items. Columns must be exactly: | Owner | Action Item | Deadline |
-    ---SPLIT---
-    [SECTION 3]: A professional corporate follow-up email ready for distribution to stakeholders based on the discussion above.
-    """
+    # IMPORTANT: Use a currently supported model
+    MODEL_ID = 'gemini-3.5-flash' 
     
     try:
-        response = model.generate_content(prompt)
-        raw_text = response.text
+        response = client.models.generate_content(
+            model=MODEL_ID,
+            contents=f"Analyze and process the following text log into the structural layout schemas:\n\n{raw_transcript}",
+            config=types.GenerateContentConfig(
+                system_instruction="You are an expert Administrative Agent.",
+                response_mime_type="application/json",
+                response_schema=MeetingAssetsSchema,
+                temperature=0.1
+            ),
+        )
+        return json.loads(response.text)
         
-        # Split string by programmatic delimiter
-        segments = raw_text.split('---SPLIT---')
-        
-        # Array protection padding loop
-        while len(segments) < 3:
-            segments.append("Processing anomaly: System failed to isolate this structural block.")
-            
+    except Exception as error:
+        # This will print the ACTUAL error to your terminal so you can fix it
+        print(f"CRITICAL ERROR in agent.py: {type(error).__name__}: {error}", file=sys.stderr)
         return {
-            "minutes": segments.strip(),
-            "tasks": segments.strip(),
-            "email": segments.strip()
+            "summary": "Error: Could not parse meeting transcript.",
+            "tasks": [{"owner": "System", "task": f"Error: {str(error)}", "deadline": "Check logs"}],
+            "email": "Pipeline failed. Check terminal for error details."
         }
-        
-    except Exception as e:
-        return {"error": f"Backend Runtime Exception: {str(e)}"}
